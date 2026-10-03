@@ -6,6 +6,7 @@
 #endif
 
 static void* libraryHandle = NULL;
+bool Indium::DynamicVK::useExtensionFunctionNames = false;
 PFN_vkGetInstanceProcAddr Indium::DynamicVK::vkGetInstanceProcAddr = NULL;
 PFN_vkCreateInstance Indium::DynamicVK::vkCreateInstance = NULL;
 PFN_vkEnumerateInstanceLayerProperties Indium::DynamicVK::vkEnumerateInstanceLayerProperties = NULL;

@@ -6,6 +6,8 @@
 #include <indium/instance.private.hpp>
 
 #include <mutex>
+#include <stdexcept>
+#include <string>
 
 namespace Indium {
 	namespace DynamicVK {
@@ -15,6 +17,52 @@ namespace Indium {
 
 		bool init();
 		void finit();
+
+		/**
+		 * When `true`, functions that were promoted to core in Vulkan 1.3 are first looked up under their
+		 * `KHR`/`EXT` extension names and only then under their core names.
+		 *
+		 * This is set when a Vulkan 1.2 device that exposes the equivalent extensions is accepted
+		 * (see `initGlobalDeviceList`), since such devices do not provide the 1.3 core entry points.
+		 */
+		extern bool useExtensionFunctionNames;
+
+		/**
+		 * Returns the extension suffix (`KHR` or `EXT`) of the extension that provides `name` on Vulkan 1.2 devices
+		 * (see `vulkan12FallbackExtensions` in `device.cpp`), or `nullptr` if `name` was not promoted to core in 1.3
+		 * from one of those extensions.
+		 */
+		inline const char* extensionSuffixFor(const std::string& name) {
+			static const char* const khr[] = {
+				"vkQueueSubmit2",
+			};
+			static const char* const ext[] = {
+				"vkCmdSetCullMode",
+				"vkCmdSetDepthBiasEnable",
+				"vkCmdSetDepthBoundsTestEnable",
+				"vkCmdSetDepthCompareOp",
+				"vkCmdSetDepthTestEnable",
+				"vkCmdSetDepthWriteEnable",
+				"vkCmdSetFrontFace",
+				"vkCmdSetPrimitiveTopology",
+				"vkCmdSetRasterizerDiscardEnable",
+				"vkCmdSetScissorWithCount",
+				"vkCmdSetStencilOp",
+				"vkCmdSetStencilTestEnable",
+				"vkCmdSetViewportWithCount",
+			};
+			for (const auto* candidate: khr) {
+				if (name == candidate) {
+					return "KHR";
+				}
+			}
+			for (const auto* candidate: ext) {
+				if (name == candidate) {
+					return "EXT";
+				}
+			}
+			return nullptr;
+		};
 
 		/**
 		 * Eagerly resolves any and all required Vulkan functions.
@@ -34,6 +82,19 @@ namespace Indium {
 
 			bool resolve() {
 				std::call_once(_resolveFlag, [&]() {
+					pointer = nullptr;
+					if (useExtensionFunctionNames) {
+						// only functions promoted in 1.3 have a suffixed variant we enabled the extension for;
+						// others (e.g. `vkWaitSemaphores`, core since 1.2) must keep their core name, because the
+						// loader hands out a non-null pointer for the suffixed name even when its extension is disabled.
+						if (const char* suffix = extensionSuffixFor(name)) {
+							auto extName = std::string(name) + suffix;
+							pointer = reinterpret_cast<void*>(vkGetInstanceProcAddr(globalInstance, extName.c_str()));
+							if (pointer) {
+								return;
+							}
+						}
+					}
 					pointer = reinterpret_cast<void*>(vkGetInstanceProcAddr(globalInstance, name));
 				});
 				return !!pointer;

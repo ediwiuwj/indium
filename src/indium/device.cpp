@@ -22,6 +22,52 @@
 
 std::vector<std::shared_ptr<Indium::PrivateDevice>> Indium::globalDeviceList;
 
+// extensions that stand in for the Vulkan 1.3 features Indium relies on, for devices that only support Vulkan 1.2
+static const char* const vulkan12FallbackExtensions[] = {
+	VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+	VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+	VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME,
+};
+
+static bool supportsVulkan12Fallback(VkPhysicalDevice device) {
+	uint32_t count = 0;
+	std::vector<VkExtensionProperties> extProps;
+
+	Indium::DynamicVK::vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+	extProps.resize(count);
+	Indium::DynamicVK::vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extProps.data());
+
+	for (const auto* required: vulkan12FallbackExtensions) {
+		bool found = false;
+		for (const auto& prop: extProps) {
+			if (strcmp(prop.extensionName, required) == 0) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			return false;
+		}
+	}
+
+	VkPhysicalDeviceSynchronization2FeaturesKHR sync2 {};
+	VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds {};
+	VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2 {};
+	VkPhysicalDeviceFeatures2 features {};
+
+	sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR;
+	sync2.pNext = &eds;
+	eds.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+	eds.pNext = &eds2;
+	eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	features.pNext = &sync2;
+
+	Indium::DynamicVK::vkGetPhysicalDeviceFeatures2(device, &features);
+
+	return sync2.synchronization2 && eds.extendedDynamicState && eds2.extendedDynamicState2;
+};
+
 void Indium::initGlobalDeviceList() {
 	std::vector<VkPhysicalDevice> physicalDevices;
 	uint32_t count = 0;
@@ -43,8 +89,15 @@ void Indium::initGlobalDeviceList() {
 		VkPhysicalDeviceProperties props;
 		DynamicVK::vkGetPhysicalDeviceProperties(device, &props);
 
-		if (VK_API_VERSION_VARIANT(props.apiVersion) != 0 || props.apiVersion < VK_API_VERSION_1_3) {
+		if (VK_API_VERSION_VARIANT(props.apiVersion) != 0 || props.apiVersion < VK_API_VERSION_1_2) {
 			// unsupported device
+			continue;
+		}
+
+		bool needsFallback = props.apiVersion < VK_API_VERSION_1_3;
+
+		if (needsFallback && !supportsVulkan12Fallback(device)) {
+			// Vulkan 1.2 device that lacks the extensions we need in place of the 1.3 features
 			continue;
 		}
 
@@ -69,6 +122,10 @@ void Indium::initGlobalDeviceList() {
 		if (!features12.timelineSemaphore) {
 			// unsupported device
 			continue;
+		}
+
+		if (needsFallback) {
+			DynamicVK::useExtensionFunctionNames = true;
 		}
 
 		globalDeviceList.push_back(std::make_shared<PrivateDevice>(std::move(device)));
@@ -188,10 +245,15 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
 		queueCreateInfos.push_back(createInfo);
 	}
 
+	bool needsFallback = _properties.apiVersion < VK_API_VERSION_1_3;
+
 	VkPhysicalDeviceFeatures2 features {};
 	VkPhysicalDeviceVulkan11Features features11 {};
 	VkPhysicalDeviceVulkan12Features features12 {};
 	VkPhysicalDeviceVulkan13Features features13 {};
+	VkPhysicalDeviceSynchronization2FeaturesKHR sync2 {};
+	VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds {};
+	VkPhysicalDeviceExtendedDynamicState2FeaturesEXT eds2 {};
 
 	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 	features.pNext = &features11;
@@ -200,9 +262,21 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
 	features11.pNext = &features12;
 
 	features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-	features12.pNext = &features13;
 
 	features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
+	sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES_KHR;
+	eds.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+	eds2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT;
+
+	if (needsFallback) {
+		// Vulkan 1.2 device: the Vulkan 1.3 feature struct isn't valid here, so use the extension feature structs instead
+		features12.pNext = &sync2;
+		sync2.pNext = &eds;
+		eds.pNext = &eds2;
+	} else {
+		features12.pNext = &features13;
+	}
 
 	DynamicVK::vkGetPhysicalDeviceFeatures2(_physicalDevice, &features);
 
@@ -214,6 +288,12 @@ Indium::PrivateDevice::PrivateDevice(VkPhysicalDevice physicalDevice):
 	std::vector<const char*> extensions {
 		// put required extensions here
 	};
+
+	if (needsFallback) {
+		for (const auto* required: vulkan12FallbackExtensions) {
+			extensions.push_back(required);
+		}
+	}
 	auto indiumFeatures = static_cast<Feature>(0);
 
 	std::vector<std::pair<const char*, Feature>> optionalExtensions {
